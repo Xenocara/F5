@@ -1,0 +1,136 @@
+#!/bin/bash
+#
+# ver. 0.5
+# - We summarize like this
+#  IP:Port (Proto) (virtServerName) <status>
+#	pool (poolName) 
+#		memberA IP:Port
+#		memberB IP:Port
+#		memberC IP:Port
+#		memberD IP:Port
+#		...
+#		...
+#
+#	ruleA iRuleName
+#	ruleB iRuleName
+#	ruleC iRuleName
+#	...
+#	...
+#
+#	pool defined in iRules 1
+#	pool defined in iRules 2
+#	pool defined in iRules 3
+#	pool defined in iRules 4
+#	...
+#	...
+#	...
+#
+#
+# You know the story. When we need summarized outputs of Virtual Server definions
+# we use this script to generate them. Don't forget to provide virtual server files like parseConf
+#
+#
+err1="\n\nThese aren't the droids, you are looking for... Move Away\n\nUsage: $0 prefix\nprefix is the common word used as name prefix while generating VirtualServer Conf files by parseConf\n"
+
+InsertPool(){
+
+  poolFirstLine=$(grep -nE "ltm pool /" ${vsConfFile} | head -n 1 | cut -d ":" -f1)
+  poolLastLine=$( sed -n ${poolFirstLine},+200p $vsConfFile | grep -nE "^}" | head -n 1 | cut -d ":" -f 1 )
+
+  sed -n ${poolFirstLine},+$(( poolLastLine -1 ))p $vsConfFile \
+  | awk '/\/[a-zA-Z0-9\-]+|session/ { print }' \
+  | sed -e 's/{//g' -e '/monitor/d' -e 's/\Common\//\t/g' -e 's/\///g' -e '/app-service/d' -e 's/session user-disabled$/\t** DISABLED by ADMIN **/g'\
+  | sed -n 2,+100p >> brief_$briefFileName
+ 
+}
+
+InsertiRules(){
+
+	ruleFirstLine=$( head -n $lastLineNumber $vsConfFile | grep -nE "^\s\s\s\srules {" |head -n 1 | cut -d ":" -f1 ) 
+	ruleLastLine=$(sed -n ${ruleFirstLine},+200p $vsConfFile | grep -nE "^\s\s\s\s}" | head -n 1 | cut -d ":" -f1)
+	echo -e "\n" >> brief_$briefFileName
+	sed -n ${ruleFirstLine},+$(( ruleLastLine -1 ))p $vsConfFile | awk '/\/[_a-zA-Z0-9\-]+\// { print $0 }' | sed -e 's/\/[_a-zA-Z0-9\-]\+\//rule /g' >> brief_$briefFileName
+
+}
+
+getExtraPools(){
+# Get pools defined in iRules
+	
+	if [ "$(grep -E ltm\ rule\ \/ ${vsConfFile})" ]; then
+
+	   ruleLineNumber=$(grep -nE "ltm rule \/[_a-zA-Z0-9\-\.]+" ${vsConfFile} | head -n 1 | cut -d ":" -f 1)		
+	   #echo " RuleLineStart at: $ruleLineNumber in $vsConfFile" # debug
+
+		isExtraPoolExist=$(tail -n +${ruleLineNumber} ${vsConfFile} | grep -cE "ltm pool \/[_a-zA-Z0-9\-\.]+" | cut -d ":" -f 1)
+		#echo "Extra Pool sayisi: $isExtraPoolExist" # debug
+
+		for ((i = 1; i < $(( isExtraPoolExist +1 )); i++))
+		  do
+
+			echo "" >> brief_$briefFileName
+			#echo "$i th travers" # debug 
+			firstLineP=$( tail -n +${ruleLineNumber} $vsConfFile | grep -nE "ltm pool \/[_a-zA-Z0-9\-\.]+" | cut -d ":" -f 1 | head -n $i | tail -n 1 ) 
+			firstLineP=$((firstLineP + ruleLineNumber -1))
+			#echo "FirstLine $firstLineP" # debug
+
+			finishLineP=$( tail -n +${firstLineP} $vsConfFile | grep -nE "^}" | cut -d ":" -f 1 | head -n 1 )
+			finishLineP=$((finishLineP + firstLineP -1))
+			#echo "LastLine $finishLineP" # debug
+
+			sed -n ${firstLineP},${finishLineP}p $vsConfFile | awk '/\/[a-zA-Z0-9\-]+|session/ { print }' | \
+			sed -e 's/{//g' -e '/monitor/d' -e 's/ltm pool \/Common\//\tpool /g' -e 's/\///g' -e '/app-service/d' \
+			-e 's/session user-disabled$/\t** DISABLED by ADMIN **/g' -e 's/Common/\t/g' >> brief_$briefFileName
+			echo "" >> brief_$briefFileName
+
+		  done
+
+	fi
+
+}
+
+base(){
+
+	lastLineNumber=$( grep -nE "^}" ${vsConfFile} | head -n 1 | cut -d ":" -f 1 )	
+	poolName=$( head -n $lastLineNumber $vsConfFile | awk '/^\s\s\s\spool \// { print $2}' )
+	briefFileName=$( echo $vsConfFile | cut -d "_" -f2- )
+	ListeningSocket=$( grep -E "destination [\/_a-zA-Z0-9\-]+/[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" ${vsConfFile} | sed 's/[^.0-9:]//g' )
+	protocol=$( awk '/ip-protocol/ { print toupper($2) }' <<< "${header}" )
+	briefFileName=$( echo $vsConfFile | cut -d "_" -f2- )
+	touch brief_$briefFileName
+	echo -e "$ListeningSocket ($protocol) ($briefFileName) $status" > brief_$briefFileName
+  	[ "$poolName" ] && echo -e "\tpool ("$(echo $poolName | cut -d "/" -f3)")" >> brief_$briefFileName
+	[ "$poolName" ] && InsertPool	
+ 	[ "$(head -n $lastLineNumber $vsConfFile | grep -E "    rules {")" ] && InsertiRules
+ 	getExtraPools
+
+}
+
+if [ $# -ne 0 ]; then 
+
+  confPrefix="$1" 
+
+	for vsConfFile in $( find . -type f -name "$confPrefix*" ) 
+	do
+		
+		header="$( grep -A8 -E "ltm virtual /[_a-zA-Z0-9\-]+/[_a-zA-Z0-9\.\-]+ {" ${vsConfFile} )"
+		[ -z "$header" ] && echo -e "\tERROR\nConf File $vsConfFile is empty\n" && exit 100
+	
+		if [ ! $(echo "$header" | grep disabled) ]; then
+
+			status=""
+			base
+
+		else 
+
+			status="** DISABLED **"
+			base
+
+		fi
+
+	done
+
+else
+
+   echo -e $err1
+
+fi 

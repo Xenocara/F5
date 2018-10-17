@@ -1,0 +1,317 @@
+#!/bin/bash
+# 
+# ver. 0.97 - (01.2017) - BNTPRO / F. Celik
+#
+# This program aims to break down an (BIGIP F5 backup) UCS file to relevant
+# parts to assemble those parts according relations between them.
+# 
+# ver. 0.91 only supports below profile types for LTM module
+# - Profiles that noted under "profiles {" tag
+# - irules 
+# - persistence profiles
+# - pools
+# 
+# Also this version (ver. 0.91) is not tested well enough and it is beta. This software comes with ABSOLUTELY NO WARRANTY . 
+# This software distributed with/under GNU / GPL ver. 2.0
+
+workDir=$(pwd)
+
+iAppFree(){
+# This Function aims to create a temporarily copy of original bigip.conf file with no "iApp" configuration.
+# After this function done its duty, you won't see any ".app" letters on temporarily "bigip.conf" config file. 
+# Also we are going to use this temp file as our reference and final "bigip.conf" config file in this script.
+
+   iappFreeConfFile=/tmp/bigip.conf_$tempDigits
+
+	/bin/cat $confFile | sed -E 's/[_a-zA-Z0-9\-]+\.app[/]//g' | sed -E '/app-service/d' > $iappFreeConfFile
+
+# Put some codes here to check if actually we wrote that files under /tmp
+
+}
+
+getVSnames(){
+# this function aims to get whole virtual server names as a list and stores in a temp file.
+# I hope that write some codes to remove all tem files before exit() in main().
+# we are intensionally using iappFree bigip.conf file. 
+
+	tempFile=/tmp/parseConf_$tempDigits
+
+	/usr/bin/awk '/ltm virtual / {print $3}' $iappFreeConfFile | sed 's/\/Common\///g' > $tempFile # head & tail added for debug
+	totalVSCount=$(/usr/bin/wc -l $tempFile | cut -d " " -f 1 )
+
+	if [ $totalVSCount -eq 0 ]; then 
+
+		echo -e "\n\t There is something wrong about your bigip.conf\n\t Your bigip.conf file has no \"ltm virtual \" line... "	
+		echo -e "\n\t I Quit... " 
+		exit 100
+
+	fi 
+	
+
+}
+
+parsePersistencyProfile(){
+
+   /bin/grep "persist {" $vsFileName > /dev/null 
+   res=$?
+   if [ $res -eq 0 ]; then 
+
+	persistName=$( /bin/grep -A1 "persist {" $vsFileName | /bin/grep -E "[/][a-zA-Z0-9_]+/[a-zA-Z0-9_]+" | awk '{print $1}'	)
+
+	case $persistName in 
+
+		/Common/cookie)
+		;;
+		/Common/dest_addr)
+		;;
+		/Common/hash)
+		;;
+		/Common/msrdp)
+		;;
+		/Common/sip_info)
+		;;
+		/Common/source_addr)
+		;;
+		/Common/ssl)
+		;;
+		/Common/universal) 
+		;;
+
+		*)
+
+		persistLineS=$( /bin/grep -nE "ltm persistence [_a-zA-Z0-9\-]+ ${persistName} {" ${iappFreeConfFile} | head -n 1 | cut -d ":" -f 1 )
+		persistLineE=$( sed -n ${persistLineS},$(( persistLineS + 30))p $iappFreeConfFile | /bin/grep -nE "^}" | head -n 1 | cut -d ":" -f 1 )
+		persistLineE=$(( persistLineS + persistLineE -1 ))	
+		/bin/sed -n ${persistLineS},${persistLineE}p $iappFreeConfFile >> $vsFileName
+		
+		;;
+	esac
+
+
+#	echo "Persistece lines S: $persistLineS " # debug
+
+   fi # no persistence 
+	
+}
+
+parsePool(){
+
+	/bin/grep -E "    pool /" $vsFileName  > /dev/null 
+	res=$?
+	if [ $res -eq 0 ]; then
+
+		poolName=$( /bin/grep -E "    pool /" $vsFileName | awk '{ print $2 }' ) 
+		poolLineS=$( /bin/grep -nE "ltm pool $poolName {" $iappFreeConfFile | head -n 1 | cut -d ":" -f 1 )
+		poolLineE=$( /bin/sed -n ${poolLineS},$(( poolLineS + 1100 ))p ${iappFreeConfFile} | /bin/grep -nE "^}" | head -n 1 | cut -d ":" -f 1 )	
+		poolLineE=$(( poolLineS + poolLineE -1 ))
+		/bin/sed -n ${poolLineS},${poolLineE}p ${iappFreeConfFile} >> $vsFileName
+	
+		monitorName=$( /bin/sed -n ${poolLineS},${poolLineE}p ${iappFreeConfFile} | grep "monitor /" | head -n 1 | awk '{ print $2 }' )		
+
+		case $monitorName in 
+
+			/Common/tcp)
+			;;
+			/Common/gateway_icmp)
+			;;
+			/Common/http)
+			;;
+			/Common/https)
+			;;
+			/Common/udp)
+			;;
+			/Common/icmp)
+			;;
+			/Common/inband)
+			;;
+			/Common/real_server)
+			;;
+			/Common/snmp_dca)
+			;;
+			/Common/tcp_echo)
+			;;
+			/Common/tcp_half_open)
+			;;
+			/Common/http_head_f5)
+			;;
+			/Common/https_443)
+			;;
+			/Common/https_head_f5)
+			;;
+			*)
+
+				monitorLineS=$( /bin/grep -nE "ltm monitor [_a-zA-Z0-9\-]+ $monitorName {" ${iappFreeConfFile} | cut -d ":" -f 1 | head -n 1 ) # geri dönen değerlerin ilkini al!
+				monitorLineE=$( /bin/sed -n ${monitorLineS},$(( monitorLineS + 20 ))p ${iappFreeConfFile} | /bin/grep -nE "^}" | head -n 1 | cut -d ":" -f 1 )
+				monitorLineE=$(( monitorLineS + monitorLineE -1 ))
+				/bin/sed -n ${monitorLineS},${monitorLineE}p ${iappFreeConfFile} >> $vsFileName
+
+			;;
+
+		esac
+
+ 
+	fi # then no pool ha ?
+
+
+
+}
+
+parseProfiles(){
+  profileName=$(/bin/grep -E "    profiles {" $vsFileName) 
+   if [ "$profileName" ]; then
+#	echo "ltm virtual ends of: $endOFvsConfig" # debug
+		profileLineS=$(/bin/grep -nE "    profiles {" $vsFileName | cut -d ":" -f 1 )
+		profileLineE=$( sed -n ${profileLineS},${endOFvsConfig}p $vsFileName | grep -nE "^\s\s\s\s}$" | head -n 1 | cut -d ":" -f 1 )
+		profileLineE=$(( profileLineS + profileLineE -1 ))
+		for profileName in $( sed -n ${profileLineS},${profileLineE}p $vsFileName | awk '/\/[_a-zA-Z0-9\-]+\// { print $1 }' )
+		do
+
+		   case $profileName in
+
+			/Common/http|/Common/oneconnect|/Common/stream|/Common/statistics|/Common/webacceleration)
+			;;
+			/Common/ftp|/Common/dns|/Common/rtsp|/Common/icap|/Common/requestadapt|/Common/responseadapt|/Common/wan-optimized-compression)
+			;;
+			/Common/diameter|/Common/dhcpv4|/Common/dhcpv6|/Common/radiusLB|/Common/ipother|/Common/certificateauthority)
+			;;
+			/Common/classification|/Common/clientldap|/Common/clientssl|/Common/dnslogging|/Common/fasthttp|/Common/udp_dns)
+			;;
+			/Common/fastl4|/Common/fastL4|/Common/fix|/Common/gtp|/Common/html|/Common/httprcompression|/Common/http2)
+			;;
+			/Common/iiop|/Common/mblb|/Common/mssql|/Common/ntlm|/Common/ocsp-stapling-params|/Common/pptp/Common/udp_gtm_dns)
+			;;
+			/Common/tcp|/Common/sip|/Common/rewrite|/Common/rtsp|/Common/sctp|/Common/smtps|/Common/socks)
+			;;
+			/Common/spdy|/Common/serverssl|/Common/stream|/Common/udp|/Common/xml|/Common/qoe|/Common/serverldap)
+			;;
+			/Common/serverssl-insecure-compatible|/Common/clientssl-insecure-compatible|/Common/tcp-lan-optimized|/Common/tcp-wan-optimized)
+			;;
+			*)
+			subProfileLineS=$(grep -nE "ltm profile [_a-zA-Z0-9\-]+ $profileName {" ${iappFreeConfFile} | cut -d ":" -f 1)
+			subProfileLineE=$( sed -n ${subProfileLineS},$((subProfileLineS + 70))p ${iappFreeConfFile} | grep -nE "^}" | head -n 1 | cut -d ":" -f 1 )
+			subProfileLineE=$(( subProfileLineS + subProfileLineE -1 ))
+			sed -n ${subProfileLineS},${subProfileLineE}p ${iappFreeConfFile} >> $vsFileName
+			;;
+
+		   esac
+		done 
+#		echo -e "Profile Start: ${profileLineS}\nProfile End: ${profileLineE}\nFile Name: $vsFileName " # debug
+   fi
+
+
+}
+
+findStartFinish(){
+# count every opening and closing curly brace and find out where it starts and ends...
+
+i=1
+openCurly=0
+
+while read -r line
+do
+  isCurly=$(echo $line | grep -E "{|}" )
+  if [ "$isCurly" ]; then 
+
+#	echo -e "\n\nTHE LINE IS : $line \nand LINE NUMBER IS: $i" #debug
+
+	openCurly=$(( openCurly + $(echo $line | sed 's/[^{]//g' | tr -d '\n' | wc -m) ))
+#	echo "THE CURLY COUNTER IS : $openCurly" # debug
+	openCurly=$(( openCurly - $(echo $line | sed 's/[^}]//g' | tr -d '\n' | wc -m) ))	
+#	echo "THE CURLY COUNTER IS : $openCurly" # debug
+
+	if [ $openCurly -eq 0 ]; then 
+
+		endingLine=$i		
+		echo $endingLine
+		exit 0
+
+	fi
+
+  fi
+
+  (( i+=1 ))
+
+done < <( cat - )
+
+}
+
+getExtraPools(){
+# just try to catch "use pool" or "pool" definition in iRules. Then put them in $vsFileName
+
+while read -r lineIN
+do
+
+	pStart=$(grep -nE "ltm pool \/[_a-zA-Z0-9\-\.]+\/${lineIN} {" ${iappFreeConfFile} | head -n 1 | cut -d ":" -f 1)
+	pEnd=$(sed -n ${pStart},+100p ${iappFreeConfFile} | grep -nE "^}" | head -n 1 | cut -d ":" -f 1)
+	pEnd=$(( pEnd -1 ))
+
+	sed -n ${pStart},+${pEnd}p ${iappFreeConfFile} >> $vsFileName
+	#echo -e "RULE CONTAINS POOL\n\n" # debug
+
+done < <( cat - )
+
+}
+
+parseIrules(){
+
+   iRuleLineS=$( grep -nE "    rules {" $vsFileName | cut -d ":" -f 1 )
+   if [ "$iRuleLineS" ]; then
+
+	iRuleLineE=$( sed -n ${iRuleLineS},${endOFvsConfig}p ${vsFileName} | grep -nE "^\s\s\s\s}$" | head -n 1 | cut -d ":" -f 1 )
+	iRuleLineE=$(( iRuleLineS + iRuleLineE -1 ))
+	for iRuleName in $( sed -n ${iRuleLineS},${iRuleLineE}p $vsFileName | awk '/\/[_a-zA-Z0-9\-]+\// { print $1 }' )
+	do
+
+		subIruleLineS=$( grep -nE "ltm rule $iRuleName {" ${iappFreeConfFile} | cut -d ":" -f 1 )
+		subIruleLineE=$( sed -n ${subIruleLineS},$(( subIruleLineS + 1200 ))p ${iappFreeConfFile} | findStartFinish )
+		subIruleLineE=$(( subIruleLineS + subIruleLineE -1 ))
+		sed -n ${subIruleLineS},${subIruleLineE}p $iappFreeConfFile >> $vsFileName
+		sed -n ${subIruleLineS},${subIruleLineE}p $iappFreeConfFile | sed -e '/#/d' -e 's/use pool/pool/g' | awk '/pool / { print $2 }' | sed -e "/^$/d" | sort | uniq | getExtraPools
+
+	done 
+#	echo "iRule starts : $iRuleLineS and finish on : $iRuleLineE " # debug
+
+   fi
+
+}
+
+# main() main()  main()  main()  main()  main()  main()  main()  main()  main()  main()   
+
+if [ $# -gt 0 ]; then
+confFile="$1"
+tempDigits=$( /bin/cat /dev/urandom | tr -cd 'a-zA-Z0-9' | head -c 9 )
+
+   iAppFree
+   getVSnames
+
+   while read -r vsName
+   do 
+
+	lineNumberS=$( /bin/egrep -nE "ltm virtual /[a-zA-Z]+.$vsName {" $iappFreeConfFile | cut -d":" -f 1 )
+	lineNumberE=$( /bin/sed -n $lineNumberS,$(( lineNumberS + 50 ))p $iappFreeConfFile | /bin/egrep -nE "^}" | head -n 1 | cut -d ":" -f 1 )
+	endOFvsConfig=$(( lineNumberE -1 ))
+#	echo "start and end points are: $lineNumberS $lineNumberE" # debug
+	lineNumberE=`echo "(  $lineNumberS + $lineNumberE ) -1" | bc ` 
+#	echo "ending Line is: $lineNumberE" # debug
+	/bin/sed -n ${lineNumberS},${lineNumberE}p $iappFreeConfFile  > $workDir/VsConfigFile_$vsName
+#	sleep 1 # debug
+
+# 	this is the place that we should start parsing VS configs
+#	put some codes here that can parse whole config about our virtual server one by one.
+	
+	vsFileName=$workDir/VsConfigFile_$vsName
+		
+	parsePersistencyProfile
+	parsePool
+	parseProfiles
+	parseIrules
+ 
+   done < $tempFile
+
+else 
+
+   echo -e "\nYou should type the actual location of bigip.conf file...\n\n\tparseConf.sh /where/is/this/bigip.conf\n " 
+
+fi
+
+# Put Some codes here to delete temp files
