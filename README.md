@@ -3,9 +3,11 @@ Some useful tools for BIG-IP F5
 -
 Basic Usage: 
   parseConf /where/is/this/bigip.conf
+  
 This tool accept relative or full path of the "bigip.conf" file as firts (and yet only) argument. Scripts needs only "r" permission on that file. Also script never update "bigip.conf" file.  
 
-  parseASbrief prefix 
+  parseASbrief prefix
+  
 This tools need to have Common Words of the exported VS names. Default prefix is "VsConfigFile_"
 
 You can use those two scripts for BIG-IP 11.X and 12.X versions. Basically you need to run "parseConf" as first and then if you need to have summarized infos about vs definitions. parseConf just exports vs definitions as files and gives vs's names as file name.
